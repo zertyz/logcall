@@ -12,10 +12,12 @@ extern crate proc_macro;
 extern crate proc_macro_error;
 
 use proc_macro2::Span;
-use quote::quote_spanned;
+use quote::{quote_spanned, ToTokens};
 use syn::spanned::Spanned;
 use syn::Ident;
 use syn::*;
+use syn::parse::{Parse, ParseStream};
+use syn::punctuated::Punctuated;
 
 enum Args {
     Simple {
@@ -27,10 +29,80 @@ enum Args {
     },
 }
 
-impl Args {
-    fn parse(input: AttributeArgs) -> Args {
-        match input.as_slice() {
+impl Parse for Args {
+
+    /// `args` comes from one of the forms bellow
+    ///    1) LEVEL -- logs only the output of a non-fallible function
+    ///    2) input=LEVEL -- logs only the inputs of a function call
+    ///    3) input=LEVEL, output=LEVEL -- same as #1 & #2 combined
+    ///    4) LEVEL, skip(<list>) -- same as #3, logging the input in the same level as the output, but excludes the parameter names in <list> from the `debug` serialization
+    ///    5) input=LEVEL, skip(<list>) -- same as #2, but excludes the identifiers in <list> from the `debug` serialization
+    ///    6) input=LEVEL, output=LEVEL, skip(<list>) -- same as #3, but excludes the identifiers in <list> from the `debug` serialization
+    ///    7) ok=LEVEL, err=LEVEL -- logs only the output of a fallible function -- either `Ok` or `Err` -- in their designated levels
+    ///    8) ok=LEVEL -- same as #7, but skip logging results that failed in `Err`
+    ///    9) err=LEVEL -- same as #7, but skip logging results that succeeded in `Ok`
+    ///   10) input=LEVEL, ok=LEVEL, err=LEVEL -- logs the inputs and output of a fallible function in their designated levels
+    ///   11) input=LEVEL, ok=LEVEL -- same as #8, additionally logging all the inputs
+    ///   12) input=LEVEL, err=LEVEL -- same as #9, additionally logging all the inputs
+    ///   13) input=LEVEL, ok=LEVEL, err=LEVEL, skip=<list> -- same as #10, but excludes the parameters in <list> from the `debug` serialization
+    ///   14) input=LEVEL, ok=LEVEL, skip=<list> -- same as #11, but excludes the parameters in <list> from the `debug` serialization
+    ///   15) input=LEVEL, err=LEVEL, skip=<list> -- same as #12, but excludes the parameters in <list> from the `debug` serialization
+    ///   16) [ok=LEVEL, ][err=LEVEL, ]skip=(<list>) -- error: if "skip" is present, either "input" or the LEVEL literal must also be present
+    ///   17) LEVEL, [*, ]output=LEVEL -- error: The legacy output level and the new "output=LEVEL" form cannot be specified concurrently
+    /// where:
+    ///   LEVEL: "trace"|"debug"|"info"|"warn"|"error"
+    ///   <list>: a list of identifiers, such as self,param_3,...
+    /// note:
+    ///   All named parameters -- "input", "err", "ok" & "skip" -- may come in any order.
+    ///   There is a requirement, 'though, that the literal parameter "LEVEL" must be the first one, if present
+    fn parse(args: ParseStream) -> Result<Args> {
+
+        fn trim_quotes(maybe_quoted: &str) -> String {
+            maybe_quoted.trim_start_matches('"').trim_end_matches('"').to_string()
+        }
+
+        // let legacy_output = args.peek(syn::Lit)
+        //     .then(|| args.parse::<syn::Lit>().ok().unwrap());
+        // match & consume the optional legacy output "level" literal
+        let legacy_output = args.parse::<syn::Lit>().ok()
+            .map(|literal| trim_quotes(&literal.to_token_stream().to_string()));
+        // consumes the "," between the legacy and "name=val" list that may, possibly, follow
+        args.parse::<Token![,]>().ok();
+        // from this point on, all other parameters will be in the form "name=val<, ...>"
+        let name_values = Punctuated::<MetaNameValue, Token![,]>::parse_terminated(args)?;
+        for name_value in &name_values {
+            let Some(name) =
+                name_value.path.get_ident().map(|ident| ident.to_string())
+            else {
+                panic!("VALUE IS NOT AN IDENTIFIER");
+            };
+            let Expr::Lit(ref literal_value) =
+                name_value.value
+            else {
+                panic!("VALUE IS NOT A LITERAL");
+            };
+            let value = trim_quotes(&literal_value.lit.to_token_stream().to_string());
+            panic!("legacy_output is '{:?}'\nname=value is '{}'='{}'", legacy_output, name, value);
+        }
+        panic!("legacy_output is '{:?}'\nname_values is '{:?}'", legacy_output, name_values);
+        // parse identifiers: let punctuated = Punctuated::<Ident, Token![,]>::parse_terminated(args)?;
+/*        let mut s = String::new();
+        for item in punctuated.iter() {
+            s.push_str(&item.path.get_ident().expect("not an ident?").to_string());
+            s.push('=');
+            s.push_str(&format!("{:?}", item.value));
+            s.push(',');
+        }
+        let mut nested_metas = args.to_vec();
+        // sort the input -- to allow simpler match arm expression bellow
+        // (otherwise we'd have to match against all permutations)
+        nested_metas.sort_unstable_by_key(|nested_meta| format!("{nested_meta:?}"));
+        // panic!("METAS is {:#?}", nested_metas);
+        Ok(match nested_metas.as_slice() {
+            // #[logcall("info")]
             [NestedMeta::Lit(Lit::Str(s))] => Args::Simple { level: s.value() },
+
+            // #[logcall(ok = "trace")]
             [NestedMeta::Meta(Meta::NameValue(MetaNameValue {
                 path,
                 lit: Lit::Str(s),
@@ -39,6 +111,8 @@ impl Args {
                 ok_level: Some(s.value()),
                 err_level: None,
             },
+
+            // #[logcall(err = "error")]
             [NestedMeta::Meta(Meta::NameValue(MetaNameValue {
                 path,
                 lit: Lit::Str(s),
@@ -47,30 +121,24 @@ impl Args {
                 ok_level: None,
                 err_level: Some(s.value()),
             },
+
+            // #[logcall(ok = "info", err = "error")]
+            // #[logcall(err = "error", ok = "info")]
             [NestedMeta::Meta(Meta::NameValue(MetaNameValue {
-                path,
+                path: path1,
                 lit: Lit::Str(s),
                 ..
             })), NestedMeta::Meta(Meta::NameValue(MetaNameValue {
                 path: path2,
                 lit: Lit::Str(s2),
                 ..
-            }))]
-            | [NestedMeta::Meta(Meta::NameValue(MetaNameValue {
-                path: path2,
-                lit: Lit::Str(s2),
-                ..
-            })), NestedMeta::Meta(Meta::NameValue(MetaNameValue {
-                path,
-                lit: Lit::Str(s),
-                ..
-            }))] if path.is_ident("ok") && path2.is_ident("err") => Args::Result {
+            }))] if path1.is_ident("err") && path2.is_ident("ok") => Args::Result {
                 ok_level: Some(s.value()),
                 err_level: Some(s2.value()),
             },
             [] => abort_call_site!("missing arguments"),
-            _ => abort_call_site!("invalid arguments"),
-        }
+            _ => abort_call_site!("invalid arguments: {:#?}", nested_metas),
+        })*/
     }
 }
 
@@ -82,7 +150,7 @@ pub fn logcall(
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(item as ItemFn);
-    let args = Args::parse(syn::parse_macro_input!(args as AttributeArgs));
+    let args = syn::parse_macro_input!(args as Args)/*.expect("Failed parsing #[logcall(...)] arguments")*/;
 
     // check for async_trait-like patterns in the block, and instrument
     // the future instead of the wrapper
@@ -325,7 +393,7 @@ fn get_async_trait_info(block: &Block, block_is_async: bool) -> Option<AsyncTrai
     // `trait` or `impl` declaration is annotated by async_trait,
     // this is quite likely the point where the future is pinned)
     let (last_expr_stmt, last_expr) = block.stmts.iter().rev().find_map(|stmt| {
-        if let Stmt::Expr(expr) = stmt {
+        if let Stmt::Expr(expr, _token) = stmt {
             Some((stmt, expr))
         } else {
             None
