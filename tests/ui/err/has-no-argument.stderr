@@ -4,4 +4,4 @@ error: custom attribute panicked
 1 | #[logcall::logcall]
   | ^^^^^^^^^^^^^^^^^^^
   |
-  = help: message: `logcall`: when annotating with #[logcall(...)], parameters should be provided, otherwise the annotation would have no effect
+  = help: message: `logcall`: when annotating with #[logcall(...)], ingress/egress log level parameters should be provided, otherwise the annotation would have no effect

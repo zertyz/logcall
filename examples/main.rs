@@ -6,22 +6,22 @@ use async_trait::async_trait;
 ////////////
 
 
-#[logcall(output="info", input="info", skip=[a,b,c])]
+#[logcall(egress="info", ingress="info")]   // logs both the inputs & the output
 fn foo(a: usize) -> usize {
     a + 1
 }
 
-#[logcall(ok = "info")]
+#[logcall(ok = "info")]  // logs only the output, if ok
 fn foz(a: usize) -> Result<usize, ()> {
     Ok(a + 1)
 }
 
-#[logcall(err = "error")]
+#[logcall(err = "error")]  // logs only the output, if err
 fn bar(a: usize) -> Result<usize, String> {
     Err(format!("{}", a + 1))
 }
 
-#[logcall(ok = "info", err = "error")]
+#[logcall(ok = "info", err = "error")]  // logs only the output
 fn baz(a: usize) -> Result<usize, String> {
     Ok(a + 1)
 }
@@ -30,17 +30,17 @@ fn baz(a: usize) -> Result<usize, String> {
 // async demo
 /////////////
 
-#[logcall("info")]
+#[logcall("info")]  // logs only the output
 async fn async_foo(a: usize) -> usize {
     a + 1
 }
 
-#[logcall(err = "error")]
+#[logcall(err = "error")]  // logs only the output (if err)
 async fn async_bar(a: usize) -> Result<usize, String> {
     Err(format!("{}", a + 1))
 }
 
-#[logcall(err = "error", ok = "info")]
+#[logcall(err = "error", ok = "info")]  // logs only the output
 async fn async_baz(a: usize) -> Result<usize, String> {
     Ok(a + 1)
 }
@@ -51,7 +51,7 @@ async fn async_baz(a: usize) -> Result<usize, String> {
 
 trait NativeAsyncTrait {
 
-    #[logcall("info")]
+    #[logcall("info")]  // logs only the output
     async fn async_foo(&self, a: usize) -> usize {
         a + 1
     }
@@ -64,12 +64,12 @@ trait NativeAsyncTrait {
 struct NativeAsync;
 impl NativeAsyncTrait for NativeAsync {
 
-    #[logcall(err = "error")]
+    #[logcall(err = "error")]  // logs only the output, if err
     async fn async_bar(&self, a: usize) -> Result<usize, String> {
         Err(format!("{}", a + 1))
     }
 
-    #[logcall(ok = "info", err = "error")]
+    #[logcall(ok = "info", err = "error")]  // logs only the output
     async fn async_baz(&self, a: usize) -> Result<usize, String> {
         Ok(a + 1)
     }
@@ -82,12 +82,12 @@ impl NativeAsyncTrait for NativeAsync {
 #[async_trait]
 trait LegacyAsyncTrait {
 
-    #[logcall("info")]
+    #[logcall("info")]  // logs only the output
     async fn async_foo(&self, a: usize) -> usize {
         a - 1
     }
     
-    #[logcall(err = "error")]
+    #[logcall(err = "error")]  // logs only the output, if err
     async fn async_bar(&self, a: usize) -> Result<usize, String> {
         Err(format!("{}", a + 1))
     }
@@ -99,12 +99,12 @@ struct LegacyAsync;
 #[async_trait]
 impl LegacyAsyncTrait for LegacyAsync {
 
-    #[logcall("info")]
+    #[logcall("info")]  // logs only the output
     async fn async_foo(&self, a: usize) -> usize {
         a + 1
     }
 
-    #[logcall(ok = "info", err = "error")]
+    #[logcall(ok = "info", err = "error")]  // logs only the output
     async fn async_baz(&self, a: usize) -> Result<usize, String> {
         Ok(a + 1)
     }
