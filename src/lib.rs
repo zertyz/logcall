@@ -19,7 +19,17 @@ use syn::*;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 
-enum Args {
+struct Args {
+    log_input_args: Option<LogInputArgs>,
+    log_output_args: Option<LogOutputArgs>,
+}
+
+struct LogInputArgs {
+    level: String,
+    skip_params: Vec<String>,
+}
+
+enum LogOutputArgs {
     Simple {
         level: String,
     },
@@ -35,23 +45,24 @@ impl Parse for Args {
     ///    1) LEVEL -- logs only the output of a non-fallible function
     ///    2) input=LEVEL -- logs only the inputs of a function call
     ///    3) input=LEVEL, output=LEVEL -- same as #1 & #2 combined
-    ///    4) LEVEL, skip(<list>) -- same as #3, logging the input in the same level as the output, but excludes the parameter names in <list> from the `debug` serialization
-    ///    5) input=LEVEL, skip(<list>) -- same as #2, but excludes the identifiers in <list> from the `debug` serialization
-    ///    6) input=LEVEL, output=LEVEL, skip(<list>) -- same as #3, but excludes the identifiers in <list> from the `debug` serialization
+    ///    4) LEVEL, skip=[list]) -- same as #3, logging the input in the same level as the output, but excludes the parameter names in [list] from the `debug` serialization
+    ///    5) input=LEVEL, skip=[list] -- same as #2, but excludes the identifiers in [list] from the `debug` serialization
+    ///    6) input=LEVEL, output=LEVEL, skip=[list] -- same as #3, but excludes the identifiers in [list] from the `debug` serialization
     ///    7) ok=LEVEL, err=LEVEL -- logs only the output of a fallible function -- either `Ok` or `Err` -- in their designated levels
-    ///    8) ok=LEVEL -- same as #7, but skip logging results that failed in `Err`
-    ///    9) err=LEVEL -- same as #7, but skip logging results that succeeded in `Ok`
+    ///    8) ok=LEVEL -- same as #7, but refrains from logging results that failed in `Err`
+    ///    9) err=LEVEL -- same as #7, but refrains from logging results that succeeded in `Ok`
     ///   10) input=LEVEL, ok=LEVEL, err=LEVEL -- logs the inputs and output of a fallible function in their designated levels
     ///   11) input=LEVEL, ok=LEVEL -- same as #8, additionally logging all the inputs
     ///   12) input=LEVEL, err=LEVEL -- same as #9, additionally logging all the inputs
-    ///   13) input=LEVEL, ok=LEVEL, err=LEVEL, skip=<list> -- same as #10, but excludes the parameters in <list> from the `debug` serialization
-    ///   14) input=LEVEL, ok=LEVEL, skip=<list> -- same as #11, but excludes the parameters in <list> from the `debug` serialization
-    ///   15) input=LEVEL, err=LEVEL, skip=<list> -- same as #12, but excludes the parameters in <list> from the `debug` serialization
-    ///   16) [ok=LEVEL, ][err=LEVEL, ]skip=(<list>) -- error: if "skip" is present, either "input" or the LEVEL literal must also be present
+    ///   13) input=LEVEL, ok=LEVEL, err=LEVEL, skip=[list] -- same as #10, but excludes the parameters in [list] from the `debug` serialization
+    ///   14) input=LEVEL, ok=LEVEL, skip=[list] -- same as #11, but excludes the parameters in [list] from the `debug` serialization
+    ///   15) input=LEVEL, err=LEVEL, skip=[list] -- same as #12, but excludes the parameters in [list] from the `debug` serialization
+    ///   16) [ok=LEVEL, ][err=LEVEL, ]skip=[list] -- error: if `skip` is present (meaning logging the inputs is activated), either `input` or the LEVEL literal must also be present
     ///   17) LEVEL, [*, ]output=LEVEL -- error: The legacy output level and the new "output=LEVEL" form cannot be specified concurrently
+    ///   18) <empty> -- error: when annotating with #[logcall(...)], parameters should be provided, otherwise the annotation would have no effect
     /// where:
     ///   LEVEL: "trace"|"debug"|"info"|"warn"|"error"
-    ///   <list>: a list of identifiers, such as self,param_3,...
+    ///   [list]: a list of identifiers, such as self,param_3,...
     /// note:
     ///   All named parameters -- "input", "err", "ok" & "skip" -- may come in any order.
     ///   There is a requirement, 'though, that the literal parameter "LEVEL" must be the first one, if present
@@ -61,14 +72,18 @@ impl Parse for Args {
             maybe_quoted.trim_start_matches('"').trim_end_matches('"').to_string()
         }
 
-        // let legacy_output = args.peek(syn::Lit)
-        //     .then(|| args.parse::<syn::Lit>().ok().unwrap());
         // match & consume the optional legacy output "level" literal
         let legacy_output = args.parse::<syn::Lit>().ok()
             .map(|literal| trim_quotes(&literal.to_token_stream().to_string()));
         // consumes the "," between the legacy and "name=val" list that may, possibly, follow
         args.parse::<Token![,]>().ok();
-        // from this point on, all other parameters will be in the form "name=val<, ...>"
+
+        // from this point on, all other acceptable parameters will be in the form "name=val<, ...>"
+        let mut ok = None;
+        let mut err = None;
+        let mut input = None;
+        let mut output = None;
+        let mut skip = Vec::new();
         let name_values = Punctuated::<MetaNameValue, Token![,]>::parse_terminated(args)?;
         for name_value in &name_values {
             let Some(name) =
@@ -76,69 +91,78 @@ impl Parse for Args {
             else {
                 panic!("VALUE IS NOT AN IDENTIFIER");
             };
+
+            // treat the optional skip=array parameter -- where `array` a list of identifiers: skip=[identifiers_list];
+            if name.as_str() == "skip" {
+                let Expr::Array(expr_array) = name_value.value.clone() else {
+                    panic!("`logcall`: `skip` parameter, if present, should be an array of identifiers");
+                };
+                for pair in expr_array.elems.pairs() {
+                    let ident = pair.value().to_token_stream().to_token_stream().to_string();
+                    skip.push(ident);
+                }
+                continue;
+            }
+
+            // treat name=literal values
             let Expr::Lit(ref literal_value) =
                 name_value.value
             else {
                 panic!("VALUE IS NOT A LITERAL");
             };
             let value = trim_quotes(&literal_value.lit.to_token_stream().to_string());
-            panic!("legacy_output is '{:?}'\nname=value is '{}'='{}'", legacy_output, name, value);
+            match name.as_str() {
+                "err" => err.replace(value),
+                "ok" => ok.replace(value),
+                "input" => input.replace(value),
+                "output" => output.replace(value),
+                _ => panic!("`logcall`: Unknown parameter in the `name=value` form: {}={}", name, value),
+            };
         }
-        panic!("legacy_output is '{:?}'\nname_values is '{:?}'", legacy_output, name_values);
-        // parse identifiers: let punctuated = Punctuated::<Ident, Token![,]>::parse_terminated(args)?;
-/*        let mut s = String::new();
-        for item in punctuated.iter() {
-            s.push_str(&item.path.get_ident().expect("not an ident?").to_string());
-            s.push('=');
-            s.push_str(&format!("{:?}", item.value));
-            s.push(',');
-        }
-        let mut nested_metas = args.to_vec();
-        // sort the input -- to allow simpler match arm expression bellow
-        // (otherwise we'd have to match against all permutations)
-        nested_metas.sort_unstable_by_key(|nested_meta| format!("{nested_meta:?}"));
-        // panic!("METAS is {:#?}", nested_metas);
-        Ok(match nested_metas.as_slice() {
-            // #[logcall("info")]
-            [NestedMeta::Lit(Lit::Str(s))] => Args::Simple { level: s.value() },
 
-            // #[logcall(ok = "trace")]
-            [NestedMeta::Meta(Meta::NameValue(MetaNameValue {
-                path,
-                lit: Lit::Str(s),
-                ..
-            }))] if path.is_ident("ok") => Args::Result {
-                ok_level: Some(s.value()),
-                err_level: None,
-            },
+        // parameters set checks
+        ////////////////////////
 
-            // #[logcall(err = "error")]
-            [NestedMeta::Meta(Meta::NameValue(MetaNameValue {
-                path,
-                lit: Lit::Str(s),
-                ..
-            }))] if path.is_ident("err") => Args::Result {
-                ok_level: None,
-                err_level: Some(s.value()),
-            },
+        // log_input_args rules
+        let log_input_args = if let Some(input_level) = input {
+            Some(LogInputArgs {
+                level: input_level,
+                skip_params: skip,
+            })
+        } else if skip.len() > 0 {
+            if let Some(input_level) = &legacy_output {
+                Some(LogInputArgs {
+                    level: input_level.clone(),
+                    skip_params: skip,
+                })
+            } else {
+                panic!("`logcall`: `skip` was specified but the `input` log level wasn't");
+            }
+        } else {
+            None
+        };
 
-            // #[logcall(ok = "info", err = "error")]
-            // #[logcall(err = "error", ok = "info")]
-            [NestedMeta::Meta(Meta::NameValue(MetaNameValue {
-                path: path1,
-                lit: Lit::Str(s),
-                ..
-            })), NestedMeta::Meta(Meta::NameValue(MetaNameValue {
-                path: path2,
-                lit: Lit::Str(s2),
-                ..
-            }))] if path1.is_ident("err") && path2.is_ident("ok") => Args::Result {
-                ok_level: Some(s.value()),
-                err_level: Some(s2.value()),
-            },
-            [] => abort_call_site!("missing arguments"),
-            _ => abort_call_site!("invalid arguments: {:#?}", nested_metas),
-        })*/
+        // log_output_args rules
+        let log_output_args = if let Some(simple_output_level) = output {
+            Some(LogOutputArgs::Simple { level: simple_output_level })
+        } else if let Some(simple_output_level) = legacy_output {
+            Some(LogOutputArgs::Simple { level: simple_output_level })
+        } else {
+            // result output?
+            if ok.is_none() && err.is_none() {
+                None
+            } else {
+                Some(LogOutputArgs::Result { ok_level: ok, err_level: err })
+            }
+        };
+
+        assert!(log_input_args.is_some() || log_output_args.is_some(), "`logcall`: when annotating with #[logcall(...)], parameters should be provided, otherwise the annotation would have no effect");
+
+        Ok(Args {
+            log_input_args,
+            log_output_args,
+        })
+
     }
 }
 
@@ -150,7 +174,7 @@ pub fn logcall(
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(item as ItemFn);
-    let args = syn::parse_macro_input!(args as Args)/*.expect("Failed parsing #[logcall(...)] arguments")*/;
+    let args = syn::parse_macro_input!(args as Args);
 
     // check for async_trait-like patterns in the block, and instrument
     // the future instead of the wrapper
@@ -232,8 +256,8 @@ fn gen_block(
     fn_name: &str,
     args: Args,
 ) -> proc_macro2::TokenStream {
-    match args {
-        Args::Simple { level } => {
+    match args.log_output_args.unwrap() {
+        LogOutputArgs::Simple { level } => {
             // Generate the instrumented function body.
             // If the function is an `async fn`, this will wrap it in an async block.
             if async_context {
@@ -264,7 +288,7 @@ fn gen_block(
                 )
             }
         }
-        Args::Result {
+        LogOutputArgs::Result {
             ok_level,
             err_level,
         } => {

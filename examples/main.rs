@@ -6,7 +6,7 @@ use async_trait::async_trait;
 ////////////
 
 
-#[logcall("info", a="info", c="info")]
+#[logcall(output="info", input="info", skip=[a,b,c])]
 fn foo(a: usize) -> usize {
     a + 1
 }
