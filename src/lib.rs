@@ -16,7 +16,7 @@ use quote::{quote_spanned, ToTokens};
 use syn::spanned::Spanned;
 use syn::Ident;
 use syn::*;
-use syn::parse::{Parse, ParseStream};
+use syn::parse::{Parse, Parser, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::token::Comma;
 
@@ -97,7 +97,7 @@ impl Parse for MacroArgs {
             let Some(name) =
                 name_value.path.get_ident().map(|ident| ident.to_string())
             else {
-                panic!("VALUE IS NOT AN IDENTIFIER");
+                panic!("On `name=val` parameters, `name` must be an identifier");
             };
 
             // treat the optional skip=array parameter -- where `array` a list of identifiers: skip=[identifiers_list];
@@ -105,10 +105,15 @@ impl Parse for MacroArgs {
                 let Expr::Array(expr_array) = name_value.value.clone() else {
                     panic!("`skip` parameter, if present, should be an array of identifiers: skip=[a,b,c,...]");
                 };
+                skip.replace(Vec::new());
                 for pair in expr_array.elems.pairs() {
-                    let ident = pair.value().to_token_stream().to_token_stream().to_string();
-                    skip.get_or_insert_with(|| Vec::new())
-                        .push(ident);
+                    let Expr::Path(path) = pair.value()
+                    else {
+                        panic!("unknown element type -- `skip` must be an array of identifiers");
+                    };
+                    let ident = path.to_token_stream().to_string();
+                    skip.as_mut()
+                        .map(|mut skip| skip.push(ident));
                 }
                 continue;
             }
@@ -117,7 +122,7 @@ impl Parse for MacroArgs {
             let Expr::Lit(ref literal_value) =
                 name_value.value
             else {
-                panic!("VALUE IS NOT A LITERAL");
+                panic!("On `name=level` parameters, `val` must be a literal -- either \"trace\", \"debug\", \"info\", \"warn\" or \"error\"");
             };
             let value = trim_quotes(&literal_value.lit.to_token_stream().to_string());
             match name.as_str() {
@@ -125,7 +130,7 @@ impl Parse for MacroArgs {
                 "ok" => ok.replace(value),
                 "ingress" => ingress.replace(value),
                 "egress" => egress.replace(value),
-                _ => panic!("Unknown parameter in the `name=value` form: {}={}", name, value),
+                _ => panic!("Unknown `name` parameter in the `name=value` form: {}={}. Name must be `err`, `ok`, `ingress`, `egress` or `skip`", name, value),
             };
         }
 

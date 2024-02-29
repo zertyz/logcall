@@ -21,7 +21,7 @@ fn bar(a: usize) -> Result<usize, String> {
     Err(format!("{}", a + 1))
 }
 
-#[logcall(ok = "info", err = "error")]  // logs only the output
+#[logcall(ok = "info", err = "error", skip=[])]  // logs both the input & output, but only at the function egress
 fn baz(a: usize) -> Result<usize, String> {
     Ok(a + 1)
 }
@@ -64,7 +64,7 @@ trait NativeAsyncTrait {
 struct NativeAsync;
 impl NativeAsyncTrait for NativeAsync {
 
-    #[logcall(err = "error")]  // logs only the output, if err
+    #[logcall(err = "error", skip=[self])]  // logs only if err: both the output & input
     async fn async_bar(&self, a: usize) -> Result<usize, String> {
         Err(format!("{}", a + 1))
     }
