@@ -26,6 +26,18 @@ fn baz(a: usize) -> Result<usize, String> {
     Ok(a + 1)
 }
 
+#[logcall(ingress = "info")]  // logs all parameters but only on the ingress of the function
+fn only_on_ingress(a: usize) {
+}
+
+#[logcall(ingress = "info")]  // logs all parameters but only on the ingress of the function
+async fn only_on_ingress_async(a: usize) {
+}
+
+#[logcall(ingress="info", egress="info")]  // logs all parameters and output, either at the ingress & egress of the function
+fn both(a: usize) -> Result<usize, ()> {
+    Ok(a + 1)
+}
 
 // async demo
 /////////////
@@ -126,6 +138,10 @@ async fn main() {
     foz(1).ok();
     bar(1).ok();
     baz(1).ok();
+    only_on_ingress(1);
+    only_on_ingress_async(1).await;
+    both(1);
+
 
     println!("####  ASYNC DEMO  ####");
 

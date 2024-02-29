@@ -213,14 +213,20 @@ pub fn logcall(
             AsyncTraitKind::Async(async_expr) => {
                 // fallback if we couldn't find the '__async_trait' binding, might be
                 // useful for crates exhibiting the same behaviors as async-trait
-                let instrumented_block = gen_egress_block(
-                    &async_expr.block,
-                    true,
-                    false,
-                    &fn_name,
-                    fn_args,
-                    macro_args,
-                );
+                let instrumented_block =
+                    gen_ingress_block(
+                        gen_egress_block(
+                            &async_expr.block,
+                            true,
+                            false,
+                            &fn_name,
+                            &fn_args,
+                            &macro_args,
+                        ),
+                        &fn_name,
+                        &fn_args,
+                        &macro_args,
+                    );
                 let async_attrs = &async_expr.attrs;
                 quote! {
                     Box::pin(#(#async_attrs) * #instrumented_block )
@@ -228,13 +234,18 @@ pub fn logcall(
             }
         }
     } else {
-        gen_egress_block(
-            &fn_item.block,
-            fn_item.sig.asyncness.is_some(),
-            fn_item.sig.asyncness.is_some(),
+        gen_ingress_block(
+            gen_egress_block(
+                &fn_item.block,
+                fn_item.sig.asyncness.is_some(),
+                fn_item.sig.asyncness.is_some(),
+                &fn_name,
+                &fn_args,
+                &macro_args,
+            ),
             &fn_name,
-            fn_args,
-            macro_args,
+            &fn_args,
+            &macro_args
         )
     };
 
@@ -270,16 +281,40 @@ pub fn logcall(
     .into()
 }
 
+/// Instrument when entering a block
+fn gen_ingress_block(
+    block: TokenStream,
+    fn_name: &str,
+    fn_args: &Vec<Ident>,
+    macro_args: &MacroArgs,
+) -> proc_macro2::TokenStream {
+    let Some(ref log_ingress_level) =
+        macro_args.log_ingress_level
+    else {
+        return block.to_token_stream()
+    };
+    let log = gen_ingress_log(&log_ingress_level, fn_name, &fn_args, &macro_args.params);
+    quote_spanned!(block.span()=>
+        #log;
+        #block
+    )
+}
+
 /// Instrument when exiting a block
 fn gen_egress_block(
     block: &Block,
     async_context: bool,
     async_keyword: bool,
     fn_name: &str,
-    fn_args: Vec<Ident>,
-    macro_args: MacroArgs,
+    fn_args: &Vec<Ident>,
+    macro_args: &MacroArgs,
 ) -> proc_macro2::TokenStream {
-    match macro_args.log_egress_args.unwrap() {
+    let Some(ref log_egress_args) =
+        macro_args.log_egress_args
+    else {
+        return block.to_token_stream()
+    };
+    match log_egress_args {
         LogEgressArgs::Simple { level } => {
             // Generate the instrumented function body.
             // If the function is an `async fn`, this will wrap it in an async block.
@@ -377,22 +412,26 @@ fn gen_egress_block(
     }
 }
 
-fn gen_ingress_log(level: &str, fn_name: &str, return_value: &str) -> proc_macro2::TokenStream {
+fn gen_ingress_log(level: &str, fn_name: &str, param_names: &Vec<Ident>, params_to_skip: &Option<Vec<String>>) -> TokenStream {
     let level = level.to_lowercase();
     if !["error", "warn", "info", "debug", "trace"].contains(&level.as_str()) {
-        abort_call_site!("unknown log level");
+        abort_call_site!("unknown log level '{}'", level);
     }
     let level: Ident = Ident::new(&level, Span::call_site());
-    let return_value: Ident = Ident::new(return_value, Span::call_site());
+    let mut fmt = String::from("<= {}(");
+    let (input_params, input_values) = build_input_format_arguments(param_names, params_to_skip.as_ref().unwrap_or(&param_names.iter().map(|ident| ident.to_string()).collect()));
+    fmt.push_str(&input_params);
+    fmt.push_str("):");
+// panic!("ingress FORMAT: #fmt: {}, #fn_name: {}, #input_values: {:?}", fmt, fn_name, input_values);
     quote!(
-        log::#level! ("{}() => {:?}", #fn_name, &#return_value)
+        ::log::#level! (#fmt, #fn_name, #input_values)
     )
 }
 
 fn gen_egress_log(level: &str, fn_name: &str, param_names: &Vec<Ident>, params_to_skip: &Option<Vec<String>>, return_value: &str) -> TokenStream {
     let level = level.to_lowercase();
     if !["error", "warn", "info", "debug", "trace"].contains(&level.as_str()) {
-        abort_call_site!("unknown log level");
+        abort_call_site!("unknown log level '{}'", level);
     }
     let level: Ident = Ident::new(&level, Span::call_site());
     let return_value: Ident = Ident::new(return_value, Span::call_site());
@@ -400,7 +439,7 @@ fn gen_egress_log(level: &str, fn_name: &str, param_names: &Vec<Ident>, params_t
     let (input_params, input_values) = build_input_format_arguments(param_names, params_to_skip.as_ref().unwrap_or(&param_names.iter().map(|ident| ident.to_string()).collect()));
     fmt.push_str(&input_params);
     fmt.push_str(") => {:?}");
-// panic!("FORMAT: #fmt: {}, #fn_name: {}, #input_values: {:?}, &#return_value: {}", fmt, fn_name, input_values, &return_value);
+// panic!("egress FORMAT: #fmt: {}, #fn_name: {}, #input_values: {:?}, &#return_value: {}", fmt, fn_name, input_values, &return_value);
     quote!(
         ::log::#level! (#fmt, #fn_name, #input_values /*notice the missing comma*/ &#return_value)
     )
